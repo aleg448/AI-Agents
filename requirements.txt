@@ -1,6 +1,9 @@
 fastapi
 uvicorn[standard]
 langchain
+langchain-community
 litellm
 chromadb
 redis
+python-dotenv
+litellm
