@@ -1,4 +1,4 @@
-# agent_core.py
+import litellm
 import random
 import os
 from datetime import datetime
@@ -10,119 +10,90 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.output_parsers import StrOutputParser
 
+litellm._turn_on_debug()
 # --- Load Environment Variables ---
 # Load variables from .env file (especially API keys or model configs for LiteLLM)
 load_dotenv()
+litellm.api_base = os.getenv("LM_STUDIO_API_BASE") + "/chat/completions"
+llm = None  # Initialize llm *outside* the try block
 
-# --- Initialize LLM ---
-# Uses LiteLLM to connect to various LLM providers or local models.
-# Ensure your environment is configured correctly for the desired model.
-# Example: Using a local Llama 3 model served via Ollama.
-# Make sure Ollama is running and has the llama3 model pulled.
+# --- Initialize LLM and Direct Test---
 try:
-    # Ensure LiteLLM can find your Ollama instance (usually localhost:11434)
-    # You might need to set OLLAMA_API_BASE_URL in your .env if it's different
-    llm = ChatLiteLLM(model="ollama/llama3", temperature=0.7)
-    # For OpenAI, it would be: llm = ChatLiteLLM(model="gpt-3.5-turbo")
+    response = litellm.completion(
+        model=os.getenv("LITELLM_MODEL"),
+        messages=[
+            {"role": "system", "content": "You are a helpful assistant."},  # Use dict format
+            {"role": "user", "content": "What is the capital of France?"},  # Use dict format
+        ],
+        custom_llm_provider="lm_studio",
+        temperature=0.7,
+    )
+    print(f"DEBUG: LiteLLM Response: {response}")
+    action = response.choices[0].message.content
+    llm = ChatLiteLLM(
+        model=os.getenv("LITELLM_MODEL"),
+        api_base=os.getenv("LM_STUDIO_API_BASE"),
+        temperature=0.7,
+        custom_llm_provider="lm_studio",
+    )
 except Exception as e:
-    print(f"Error initializing LLM: {e}")
-    print("Please ensure your LLM provider (e.g., Ollama) is running and configured correctly.")
-    print("Or set appropriate API keys in the .env file.")
-    # Fallback to basic logic if LLM fails
+    print(f"ERROR: LiteLLM Direct Test Failed: {e}")
+    action = "Error"
     llm = None
 
-# --- Memory Placeholders ---
-# Replace these with actual ChromaDB interactions later
-def retrieve_memories(agent_name: str, observation: str, k: int = 5) -> list[str]:
-    """
-    Placeholder for retrieving relevant memories for the agent.
-    Should query ChromaDB based on the observation embedding.
-    """
-    print(f"DEBUG: Retrieving memories for {agent_name} based on '{observation}' (placeholder).")
-    # Simulating retrieval - replace with actual vector search
-    # relevant_memories = vector_db.similarity_search(observation, k=k)
-    # return [mem.page_content for mem in relevant_memories]
-    return ["Memory: Started the day feeling motivated.", "Memory: Had coffee earlier."] # Example fixed memories
 
-def store_memory(agent_name: str, memory_entry: str):
-    """
-    Placeholder for storing a new memory for the agent in ChromaDB.
-    """
-    print(f"DEBUG: Storing memory for {agent_name}: '{memory_entry}' (placeholder).")
-    # vector_db.add_texts([memory_entry], metadatas=[{"agent": agent_name, "timestamp": datetime.now()}])
-    pass
+# --- Agent Class ---
+class Agent:
+    def __init__(self, name, goal, memories=None):
+        self.name = name
+        self.goal = goal
+        self.memories = memories if memories is not None else []
 
-# --- Agent Core Logic ---
-def get_agent_action(agent_name: str, agent_goal: str, current_time: datetime, observation: str) -> str:
+    def get_memories(self, observation):
+        # Placeholder for memory retrieval logic
+        return self.memories
+
+    def add_memory(self, memory):
+        self.memories.append(memory)
+
+# --- Action Selection Function ---
+def get_agent_action(agent, observation, current_time):
     """
-    Determines the next action for an agent using an LLM via LangChain.
+    Determines the next action for an agent based on the current observation,
+    recent memories, and the agent's goal.  Uses an LLM to generate the action.
 
     Args:
-        agent_name: The name of the agent.
-        agent_goal: The high-level goal of the agent.
-        current_time: The current simulation time.
-        observation: A string describing the agent's current observation.
+        agent (Agent): The agent for whom to determine the action.
+        observation (str): The agent's current observation of the environment.
+        current_time (str): The current time in the simulation.
 
     Returns:
-        A string describing the agent's chosen action.
+        str: The action the agent will take.
     """
-    time_str = current_time.strftime("%Y-%m-%d %H:%M")
-    action = f"idle due to error or LLM not available ({observation})" # Default action
+    # 1. Get relevant memories
+    relevant_memories = agent.get_memories(observation)
 
-    if not llm: # Check if LLM initialization failed
-        print(f"[{time_str}] {agent_name} falling back to basic logic.")
-        # Basic fallback (can refine this)
-        hour = current_time.hour
-        if 8 <= hour < 17:
-            action = random.choice(["doing something productive", "thinking", "observing"])
-        else:
-            action = random.choice(["resting", "sleeping", "wandering"])
-        print(f"[{time_str}] {agent_name} decided to: {action} (fallback)")
-        return action
-
-    # 1. Retrieve relevant memories (using placeholder)
-    relevant_memories = retrieve_memories(agent_name, observation)
-    memory_str = "\n".join(f"- {mem}" for mem in relevant_memories) if relevant_memories else "No relevant memories found."
-
-    # 2. Define the prompt template
-    # This prompt guides the LLM's decision-making process.
-    prompt_template = ChatPromptTemplate.from_messages([
-        ("system", """You are an AI agent simulating a person named {agent_name}.
-Your core goal is: {agent_goal}.
+    # 2. Construct the prompt
+    system_prompt = f"""You are an AI agent simulating a person named {agent.name}.
+Your core goal is: {agent.goal}.
 You exist in a simulated world. You need to decide your next action based on your current situation and memories.
-Current time: {time_str}.
+Current time: {current_time}.
 Your recent relevant memories:
-{memory_str}
+{relevant_memories}
 
-Based on this information and your goal, decide on a **single, specific, short action** you will take right now. Be concise and describe the action directly (e.g., "drink coffee", "write chapter 3", "go for a run in the park", "check email"). Do not narrate or explain your reasoning, just state the action."""),
-        ("human", "Current observation: {observation}\nWhat is your next action?")
-    ])
+Based on this information and your goal, decide on a **single, specific, short action** you will take right now. Be concise and describe the action directly (e.g., "drink coffee", "write chapter 3", "go for a run in the park", "check email"). Do not narrate or explain your reasoning, just state the action."""
 
-    # 3. Create the chain: Prompt -> LLM -> Output Parser
-    chain = prompt_template | llm | StrOutputParser()
-
-    # 4. Invoke the chain with agent-specific data
-    try:
-        print(f"DEBUG: Invoking LLM for {agent_name}...")
-        action = chain.invoke({
-            "agent_name": agent_name,
-            "agent_goal": agent_goal,
-            "time_str": time_str,
-            "memory_str": memory_str,
-            "observation": observation,
-        })
-        action = action.strip() # Clean up whitespace
-        print(f"[{time_str}] {agent_name} decided to: {action} (via LLM)")
-
-        # 5. Store memory of observation and action (using placeholder)
-        memory_entry = f"At {time_str}, I observed '{observation}' and decided to '{action}'."
-        store_memory(agent_name, memory_entry)
-
-    except Exception as e:
-        print(f"Error during LLM invocation for {agent_name}: {e}")
-        # Fallback action if LLM fails
-        action = f"pondering the situation ({observation}) after an error"
-        print(f"[{time_str}] {agent_name} decided to: {action} (fallback due to error)")
-
-
+    prompt_template = ChatPromptTemplate.from_messages(
+        [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=f"Current observation: {observation}\nWhat is your next action?"),
+        ]
+    )
+    if llm is not None: # check if llm is initialized
+        chain = prompt_template | llm | StrOutputParser()
+        action = chain.invoke({})
+    else:
+        action = f"{random.choice(['resting', 'wandering', 'thinking'])} (fallback)"
+    print(f"[{current_time}] {agent.name} decided to: {action}")
+    agent.add_memory(f"Memory: {action}")
     return action

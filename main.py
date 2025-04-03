@@ -1,4 +1,3 @@
-# main.py
 import uvicorn
 from fastapi import FastAPI
 from datetime import datetime, timedelta
@@ -15,20 +14,20 @@ app = FastAPI(title="AI Agent Simulation Backend")
 # In a real application, use Redis for scalability and persistence.
 simulation_state = {
     "current_time": datetime.now().replace(hour=7, minute=0, second=0, microsecond=0),
-    "time_step_minutes": 15, # How much time passes each step
+    "time_step_minutes": 15,  # How much time passes each step
     "agents": {
         "Alice": {
             "name": "Alice",
             "goal": "write a novel and live a balanced life",
-            "location": "Home Office", # Simplified state
+            "location": "Home Office",  # Simplified state
             "current_action": "Waking up",
         },
         "Bob": {
             "name": "Bob",
             "goal": "prepare for a marathon and excel at work",
-            "location": "Kitchen", # Simplified state
+            "location": "Kitchen",  # Simplified state
             "current_action": "Making coffee",
-        }
+        },
     },
     "locations": {
         "Home Office": {"occupants": ["Alice"]},
@@ -37,8 +36,9 @@ simulation_state = {
         "Gym": {"occupants": []},
         "Library": {"occupants": []},
         "Workplace": {"occupants": []},
-    }
+    },
 }
+
 
 # --- Helper Functions ---
 def get_observation(agent_name: str) -> str:
@@ -67,6 +67,7 @@ def get_observation(agent_name: str) -> str:
 
     return observation
 
+
 # --- Simulation Step Logic ---
 def run_simulation_step():
     """
@@ -82,10 +83,9 @@ def run_simulation_step():
 
         # 2. Get Action from Agent Core (using placeholder logic for now)
         action = get_agent_action(
-            agent_name=agent_name,
-            agent_goal=agent_data["goal"],
+            agent=simulation_state["agents"][agent_name],  # Pass the agent *object*
+            observation=observation,
             current_time=current_time,
-            observation=observation
         )
 
         # 3. Update Agent State (Simplified)
@@ -103,8 +103,9 @@ def run_simulation_step():
     # Return current state (optional, useful for API response)
     return {
         "current_time": simulation_state["current_time"].isoformat(),
-        "agents": simulation_state["agents"]
+        "agents": simulation_state["agents"],
     }
+
 
 # --- API Endpoints ---
 @app.get("/")
@@ -112,11 +113,13 @@ def read_root():
     """ Basic endpoint to check if the server is running. """
     return {"message": "AI Agent Simulation Backend is running."}
 
+
 @app.post("/step")
 def trigger_simulation_step():
     """ Triggers one step of the simulation and returns the updated state. """
     updated_state = run_simulation_step()
     return updated_state
+
 
 @app.get("/state")
 def get_current_state():
@@ -126,14 +129,14 @@ def get_current_state():
     state_copy["current_time"] = state_copy["current_time"].isoformat()
     return state_copy
 
+
 # --- Main Execution ---
 if __name__ == "__main__":
     # We can run a few steps automatically on startup for testing
     # print("Running initial simulation steps...")
     # for _ in range(3): # Run 3 steps
-    #     run_simulation_step()
+    #  run_simulation_step()
     # print("\nStarting FastAPI server...")
 
     # Run the FastAPI server
     uvicorn.run(app, host="0.0.0.0", port=8000)
-
