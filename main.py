@@ -2,199 +2,256 @@
 import uvicorn
 from fastapi import FastAPI, HTTPException, Body
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 import os
+import uuid # For generating unique task IDs
+import json # For serializing/deserializing Redis data
 
-# Import the refactored agent class
-from agent_core import CybersecurityAgent
+# Import agent classes
+from agent_core import CybersecurityAgent, CodeGeneratorAgent
+
+# Import Redis client functions
+import redis_client as rc
 
 # --- FastAPI Application Setup ---
-app = FastAPI(title="Cybersecurity Agent Simulation Backend")
+app = FastAPI(title="Cybersecurity Agent Simulation Backend - Phase 2")
 
-# --- Example Code Snippets for Testing ---
-EXAMPLE_PYTHON_CODE = """
-import os
-
-def get_user_data(user_id):
-    # Simulate fetching data - Potential for insecurity if user_id is injectable
-    query = "SELECT * FROM users WHERE id = '" + user_id + "'"
-    print(f"Executing query: {query}")
-    # In a real app, database connection and execution would happen here
-    # db.execute(query)
-    return {"id": user_id, "name": "Sample User"}
-
-def process_file(filename):
-    # Potential path traversal if filename is user-controlled
-    full_path = "/data/files/" + filename
-    if os.path.exists(full_path):
-        with open(full_path, 'r') as f:
-            return f.read()
-    return None
-"""
-
-EXAMPLE_JAVA_CODE = """
-import java.sql.Connection;
-import java.sql.DriverManager;
-import java.sql.ResultSet;
-import java.sql.Statement;
-
-public class UserDAO {
-    public String getUserInfo(String userId) {
-        String userInfo = "";
-        try {
-            Connection conn = DriverManager.getConnection("jdbc:mysql://localhost:3306/mydb", "user", "password");
-            Statement stmt = conn.createStatement();
-            // Vulnerable to SQL Injection
-            String query = "SELECT name, email FROM user_accounts WHERE user_id = '" + userId + "'";
-            System.out.println("Executing: " + query);
-            ResultSet rs = stmt.executeQuery(query);
-            if (rs.next()) {
-                userInfo = "Name: " + rs.getString("name") + ", Email: " + rs.getString("email");
-            }
-            conn.close();
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
-        return userInfo;
-    }
-}
-"""
-
-# --- Simulation State (In-Memory) ---
+# --- Simulation State (Agent Objects & Statuses in Memory) ---
+# Task Queue and Results Store now live in Redis
 simulation_state = {
     "current_time": datetime.now().replace(minute=0, second=0, microsecond=0),
-    "time_step_minutes": 60, # Longer steps might make sense for analysis tasks
+    "time_step_minutes": 1, # Shorter steps for more responsive queue processing
     "agents": {
-        "CodeScannerAgent": CybersecurityAgent(
-            name="CodeScannerAgent",
-            task_description="Analyze Python code snippets for common vulnerabilities like SQL injection, path traversal, and insecure deserialization.",
-            target_context=EXAMPLE_PYTHON_CODE
+        # --- Analyzer Agents ---
+        "PyScanner": CybersecurityAgent(
+            name="PyScanner",
+            role_description="Analyze Python code snippets for common vulnerabilities (SQLi, XSS, Path Traversal, etc.)."
         ),
-        "JavaRefactorAgent": CybersecurityAgent(
-            name="JavaRefactorAgent",
-            task_description="Analyze Java code for SQL injection vulnerabilities and suggest refactored code to mitigate them using PreparedStatement.",
-            target_context=EXAMPLE_JAVA_CODE
-        )
-    }
-    # 'locations' dictionary removed
+        "JavaScanner": CybersecurityAgent(
+            name="JavaScanner",
+            role_description="Analyze Java code snippets for common vulnerabilities, focusing on SQLi and insecure object handling."
+        ),
+        # --- Generator Agent ---
+        "CodeGen": CodeGeneratorAgent(
+            name="CodeGen"
+        ),
+    },
+    # --- Agent Statuses (Managed in memory alongside objects) ---
+    "agent_statuses": {
+        "PyScanner": {"status": "idle", "current_task_id": None, "cooldown_steps": 0},
+        "JavaScanner": {"status": "idle", "current_task_id": None, "cooldown_steps": 0},
+        "CodeGen": {"status": "idle", "current_task_id": None, "cooldown_steps": 0},
+    },
+    "generator_cooldown": 2, # Steps the generator waits after generating code
+    "analyzer_cooldown": 1, # Steps the analyzer waits after finishing analysis
 }
-
-# --- Helper Functions ---
-def get_agent_context(agent_name: str) -> Optional[str]:
-    """ Gets the target context for the specified agent. """
-    agent = simulation_state["agents"].get(agent_name)
-    if agent:
-        return agent.target_context
-    return None
 
 # --- Simulation Step Logic ---
 def run_simulation_step() -> Dict:
     """
-    Runs one step of the simulation, triggering each agent's task.
+    Runs one step of the simulation:
+    - Generators create tasks and add to Redis queue.
+    - Analyzers pick tasks from Redis queue, analyze, and store results in Redis.
     """
     current_time = simulation_state["current_time"]
-    print(f"\n--- Simulation Step: {current_time.strftime('%Y-%m-%d %H:%M')} ---")
+    print(f"\n--- Simulation Step: {current_time.strftime('%Y-%m-%d %H:%M:%S')} ---")
 
-    results = {} # Store results for this step
+    step_events = [] # Log events during this step
 
-    # Process each agent
+    # --- 1. Update Cooldowns ---
+    for name in simulation_state["agent_statuses"]:
+        status_info = simulation_state["agent_statuses"][name]
+        if status_info["cooldown_steps"] > 0:
+            status_info["cooldown_steps"] -= 1
+            if status_info["cooldown_steps"] == 0 and status_info["status"] == 'cooldown':
+                 status_info["status"] = 'idle'
+                 step_events.append(f"Agent {name} finished cooldown, now idle.")
+
+    # --- 2. Process Generators ---
     for agent_name, agent in simulation_state["agents"].items():
-        print(f"\nProcessing Agent: {agent_name} (Task: {agent.task_description})")
-        context = agent.target_context # Use the agent's current context
+        if isinstance(agent, CodeGeneratorAgent):
+            status_info = simulation_state["agent_statuses"][agent_name]
+            if status_info["status"] == 'idle':
+                print(f"Triggering {agent_name} to generate code...")
+                status_info["status"] = 'generating'
+                generated_data = agent.perform_task(current_time=current_time)
+                status_info["status"] = 'cooldown' # Go into cooldown regardless of success
+                status_info["cooldown_steps"] = simulation_state["generator_cooldown"]
 
-        if not context:
-            print(f"Agent {agent_name} has no target context. Skipping.")
-            agent.current_action = "Idle - No context"
-            results[agent_name] = {"status": "skipped", "reason": "No context"}
-            continue
+                if generated_data:
+                    # Create a new task for the queue
+                    new_task_id = str(uuid.uuid4())
+                    new_task = {
+                        'task_id': new_task_id,
+                        'description': f"Analyze generated {generated_data.get('language','unknown')} code: {generated_data.get('description', 'N/A')}",
+                        'context': generated_data.get('code', ''),
+                        'language': generated_data.get('language', None),
+                        'submitted_by': agent_name,
+                        'status': 'pending',
+                        'submitted_time': current_time.isoformat()
+                    }
+                    if rc.add_task_to_queue(new_task):
+                        step_events.append(f"{agent_name} generated task {new_task_id} ({new_task['language']}) and added to queue.")
+                    else:
+                         step_events.append(f"{agent_name} failed to add generated task {new_task_id} to queue.")
+                else:
+                    step_events.append(f"{agent_name} failed to generate code.")
+                # Set cooldown even on failure to prevent rapid retries
+                status_info["status"] = 'cooldown'
+                status_info["cooldown_steps"] = simulation_state["generator_cooldown"]
 
-        # 2. Perform Task using Agent Core (LLM call)
-        analysis_result = agent.perform_task(current_time=current_time)
+    # --- 3. Process Analyzers ---
+    task_queue_length = rc.get_queue_length()
+    print(f"DEBUG: Task queue length: {task_queue_length}")
 
-        # 3. Update Agent State
-        agent.current_action = f"Completed analysis at {current_time.strftime('%H:%M')}"
-        agent.findings.append(f"[{current_time.strftime('%H:%M')}] Analysis Result:\n{analysis_result}\n" + "-"*20) # Store the full finding
-        print(f"Agent {agent_name} Result:\n{analysis_result}")
-        results[agent_name] = {"status": "completed", "result_preview": analysis_result[:200] + "..."}
+    if task_queue_length > 0:
+        for agent_name, agent in simulation_state["agents"].items():
+            if isinstance(agent, CybersecurityAgent): # Only process analyzers here
+                status_info = simulation_state["agent_statuses"][agent_name]
+                # Check if agent is idle AND if there are tasks remaining in the queue
+                if status_info["status"] == 'idle' and rc.get_queue_length() > 0:
+                    print(f"Attempting to assign task to idle agent {agent_name}...")
+                    task_data = rc.get_task_from_queue()
 
+                    if task_data:
+                        task_id = task_data['task_id']
+                        print(f"Assigning task {task_id} to {agent_name}.")
+                        status_info["status"] = 'analyzing'
+                        status_info["current_task_id"] = task_id
+
+                        # Perform the analysis
+                        analysis_result = agent.perform_task(
+                            task_description_specific=task_data['description'],
+                            target_context=task_data['context'],
+                            current_time=current_time
+                        )
+
+                        # Store the result in Redis
+                        completion_time = datetime.now()
+                        result_entry = {
+                            'task_id': task_id,
+                            'original_task': task_data, # Store original task details
+                            'analysis_result': analysis_result,
+                            'analyzed_by': agent_name,
+                            'status': 'completed' if not analysis_result.startswith("Error:") else 'analysis_failed',
+                            'completion_time': completion_time.isoformat()
+                        }
+                        rc.store_result(task_id, result_entry)
+
+                        # Handle analysis errors (optional: add to failed queue)
+                        if result_entry['status'] == 'analysis_failed':
+                            step_events.append(f"Agent {agent_name} failed analysis for task {task_id}.")
+                            rc.add_failed_task(task_data, analysis_result) # Log to failed queue
+                        else:
+                             step_events.append(f"Agent {agent_name} completed analysis for task {task_id}.")
+
+                        # Reset agent state after processing
+                        status_info["status"] = 'cooldown'
+                        status_info["current_task_id"] = None
+                        status_info["cooldown_steps"] = simulation_state["analyzer_cooldown"]
+
+                    else:
+                        # This case might happen if multiple agents tried to grab the last task concurrently
+                        print(f"Agent {agent_name} found queue empty after check.")
+                        break # No more tasks left
 
     # Advance Simulation Time
     simulation_state["current_time"] += timedelta(minutes=simulation_state["time_step_minutes"])
 
-    # Return summary of the step results
+    # Return summary of the step
     return {
         "step_time": current_time.isoformat(),
         "next_time": simulation_state["current_time"].isoformat(),
-        "step_results": results
+        "queue_length": rc.get_queue_length(),
+        "results_count": rc.get_results_count(),
+        "step_events": step_events
     }
 
 # --- API Endpoints ---
+@app.on_event("startup")
+async def startup_event():
+    """Initialize Redis client on startup."""
+    print("FastAPI startup: Initializing Redis client...")
+    rc.get_redis_client() # Establish connection, will raise error if connection fails
+
 @app.get("/")
 def read_root():
     """ Basic endpoint to check if the server is running. """
-    return {"message": "Cybersecurity Agent Simulation Backend is running."}
+    return {"message": "Cybersecurity Agent Simulation Backend (Phase 2) is running."}
 
 @app.post("/step", summary="Run One Simulation Step")
 def trigger_simulation_step():
-    """ Triggers one analysis step for all agents and returns step results. """
-    step_summary = run_simulation_step()
-    return step_summary
+    """ Triggers one simulation step and returns a summary of events. """
+    try:
+        step_summary = run_simulation_step()
+        return step_summary
+    except Exception as e:
+         # Catch unexpected errors during step execution
+         print(f"CRITICAL ERROR during simulation step: {e}")
+         raise HTTPException(status_code=500, detail=f"Simulation step failed: {e}")
+
 
 @app.get("/state", summary="Get Current Simulation State")
 def get_current_state():
-    """ Returns the current state of all agents in the simulation. """
-    # Create a serializable representation of the agents' state
-    serializable_agents = {}
-    for agent_name, agent in simulation_state["agents"].items():
-        serializable_agents[agent_name] = {
-            "name": agent.name,
-            "task_description": agent.task_description,
-            "current_action": agent.current_action,
-            "target_context_preview": (agent.target_context[:200] + "..." if agent.target_context else "None"),
-            "findings_count": len(agent.findings),
-            "recent_findings": agent.findings[-2:], # Show last 2 findings
-            "memories_count": len(agent.memories),
-            "recent_memories": agent.memories[-3:], # Show last 3 memories
-        }
-
+    """ Returns the current state including agent statuses and queue/result counts. """
+    # Agent statuses are from in-memory state
+    agent_statuses = simulation_state["agent_statuses"]
     return {
         "current_simulation_time": simulation_state["current_time"].isoformat(),
-        "agents": serializable_agents
-        }
-
-# --- Optional Endpoint from Plan ---
-@app.post("/submit_task", summary="Submit a New Task to an Agent")
-def submit_task_to_agent(
-    agent_name: str = Body(...),
-    task_description: str = Body(...),
-    context: str = Body(...)
-):
-    """
-    Assigns a new task description and context (e.g., code) to a specific agent.
-    """
-    if agent_name not in simulation_state["agents"]:
-        raise HTTPException(status_code=404, detail=f"Agent '{agent_name}' not found.")
-
-    agent = simulation_state["agents"][agent_name]
-    agent.task_description = task_description
-    agent.target_context = context
-    agent.current_action = "Received new task"
-    agent.findings = [] # Clear old findings when a new task is submitted
-    agent.add_memory(f"Received new task: {task_description}")
-
-    print(f"Updated Agent {agent_name} with new task: {task_description}")
-
-    return {
-        "message": f"Task successfully submitted to agent '{agent_name}'.",
-        "agent_name": agent_name,
-        "new_task_description": task_description,
-        "context_preview": context[:200] + "..."
+        "agent_statuses": agent_statuses,
+        "task_queue_length": rc.get_queue_length(),
+        "results_stored_count": rc.get_results_count(),
     }
+
+@app.post("/submit_task", summary="Manually Submit a Task to the Queue")
+def submit_task_to_queue(
+    task_description: str = Body(...),
+    context: str = Body(...),
+    language: Optional[str] = Body(None)
+):
+    """ Adds a task manually to the Redis task queue. """
+    new_task_id = str(uuid.uuid4())
+    new_task = {
+        'task_id': new_task_id,
+        'description': task_description,
+        'context': context,
+        'language': language,
+        'submitted_by': 'User',
+        'status': 'pending',
+        'submitted_time': datetime.now().isoformat()
+    }
+    if rc.add_task_to_queue(new_task):
+        return {"message": "Task successfully submitted to queue.", "task_id": new_task_id}
+    else:
+        raise HTTPException(status_code=500, detail="Failed to add task to Redis queue.")
+
+@app.get("/tasks", summary="View Pending Tasks")
+def get_pending_tasks(limit: int = 10):
+    """ Retrieves the first 'limit' tasks from the pending queue. """
+    tasks = rc.peek_tasks(limit)
+    return {"pending_tasks": tasks, "count": len(tasks), "total_in_queue": rc.get_queue_length()}
+
+@app.get("/results", summary="View Completed Results")
+def get_completed_results(limit: int = 10):
+    """ Retrieves the most recent 'limit' results from the results store. """
+    results = rc.get_recent_results(limit)
+    return {"recent_results": results, "count": len(results), "total_results": rc.get_results_count()}
+
+@app.get("/results/{task_id}", summary="Get Specific Result by Task ID")
+def get_single_result(task_id: str):
+    """ Retrieves the result for a specific task ID. """
+    result = rc.get_result(task_id)
+    if result:
+        return result
+    else:
+        raise HTTPException(status_code=404, detail=f"Result for task_id '{task_id}' not found.")
+
 
 # --- Main Execution ---
 if __name__ == "__main__":
-    print("Starting Cybersecurity Agent Backend...")
+    print("Starting Cybersecurity Agent Backend (Phase 2)...")
+    print(f"Attempting to connect to Redis at {rc.REDIS_HOST}:{rc.REDIS_PORT} DB {rc.REDIS_DB}")
+    # The startup event handles the initial connection attempt
     print(f"Ensure LM Studio is running and serving model: {os.getenv('LLM_MODEL', 'instructlab/granite-7b-lab')}")
     print(f"LM Studio URL configured as: {os.getenv('LM_STUDIO_URL', 'http://localhost:1234/v1/chat/completions')}")
-    # Run the FastAPI server
     uvicorn.run(app, host="0.0.0.0", port=8000)
