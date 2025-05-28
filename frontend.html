@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Agent Interaction Pipeline</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+        .pipeline-stage {
+            border: 1px solid #e2e8f0;
+            border-radius: 0.5rem;
+            padding: 1rem;
+            margin-bottom: 1rem;
+            background-color: #f9fafb;
+        }
+        .pipeline-stage h3 {
+            font-size: 1.125rem;
+            font-weight: 600;
+            color: #1f2937;
+            margin-bottom: 0.5rem;
+        }
+        .pipeline-stage pre {
+            background-color: #e5e7eb;
+            color: #374151;
+            padding: 0.75rem;
+            border-radius: 0.375rem;
+            overflow-x: auto;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+        #finalResponseContainer pre {
+             background-color: #d1fae5; /* A light green for final response */
+             color: #065f46;
+        }
+        .loader {
+            border: 5px solid #f3f3f3; /* Light grey */
+            border-top: 5px solid #3498db; /* Blue */
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 20px auto;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body class="bg-gray-100 text-gray-800 p-4 md:p-8">
+    <div class="container mx-auto max-w-3xl bg-white shadow-xl rounded-lg p-6">
+        <header class="mb-6 text-center">
+            <h1 class="text-3xl font-bold text-blue-600">AI Interaction Pipeline</h1>
+            <p class="text-gray-600">Enter your request to see the AI agents in action.</p>
+        </header>
+
+        <div class="mb-6">
+            <label for="userInput" class="block text-sm font-medium text-gray-700 mb-1">Your Request:</label>
+            <textarea id="userInput" rows="4" class="w-full p-3 border border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500" placeholder="e.g., Tell me about black holes... or I'm feeling really down today..."></textarea>
+        </div>
+
+        <div class="text-center mb-6">
+            <button id="submitRequestBtn" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 px-6 rounded-md shadow-md transition duration-150 ease-in-out">
+                Submit Request
+            </button>
+        </div>
+
+        <div id="loadingIndicator" class="hidden loader"></div>
+
+        <div id="resultsArea" class="mt-6">
+            <div id="finalResponseContainer" class="mb-6">
+                </div>
+            <hr class="my-6">
+            <h2 class="text-2xl font-semibold mb-4 text-gray-700">Pipeline Stages Breakdown:</h2>
+            <div id="pipelineStagesContainer">
+                </div>
+        </div>
+         <div id="errorDisplay" class="mt-4 p-3 bg-red-100 text-red-700 border border-red-300 rounded-md hidden">
+            </div>
+    </div>
+
+    <script>
+        const userInputEl = document.getElementById('userInput');
+        const submitRequestBtn = document.getElementById('submitRequestBtn');
+        const resultsAreaEl = document.getElementById('resultsArea');
+        const finalResponseContainerEl = document.getElementById('finalResponseContainer');
+        const pipelineStagesContainerEl = document.getElementById('pipelineStagesContainer');
+        const loadingIndicatorEl = document.getElementById('loadingIndicator');
+        const errorDisplayEl = document.getElementById('errorDisplay');
+
+        submitRequestBtn.addEventListener('click', async () => {
+            const userText = userInputEl.value.trim();
+            if (!userText) {
+                alert("Please enter a request.");
+                return;
+            }
+
+            // Clear previous results and show loader
+            finalResponseContainerEl.innerHTML = '';
+            pipelineStagesContainerEl.innerHTML = '';
+            errorDisplayEl.classList.add('hidden');
+            errorDisplayEl.textContent = '';
+            loadingIndicatorEl.classList.remove('hidden');
+            submitRequestBtn.disabled = true;
+
+            try {
+                //here to change endpoint
+                const response = await fetch('/process_user_request', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ user_id: 'testUser123', text: userText }),
+                });
+
+                loadingIndicatorEl.classList.add('hidden');
+                submitRequestBtn.disabled = false;
+
+                if (!response.ok) {
+                    let errorMsg = `Error: ${response.status} ${response.statusText}`;
+                    try {
+                        const errorData = await response.json();
+                        errorMsg = errorData.detail || errorData.error_message || JSON.stringify(errorData);
+                    } catch (e) { /* Ignore if error response is not JSON */ }
+                    throw new Error(errorMsg);
+                }
+
+                const data = await response.json();
+                displayResults(data);
+
+            } catch (error) {
+                console.error('Failed to process request:', error);
+                loadingIndicatorEl.classList.add('hidden');
+                submitRequestBtn.disabled = false;
+                errorDisplayEl.textContent = `Failed to process request: ${error.message}`;
+                errorDisplayEl.classList.remove('hidden');
+            }
+        });
+
+        function displayResults(data) {
+            // Display Final Response
+            if (data.final_response) {
+                const finalResponseCard = `
+                    <div class="pipeline-stage">
+                        <h3>Final Response to User</h3>
+                        <pre>${escapeHtml(data.final_response)}</pre>
+                    </div>`;
+                finalResponseContainerEl.innerHTML = finalResponseCard;
+            } else if (data.error_message) {
+                 const errorCard = `
+                    <div class="pipeline-stage bg-red-50 border-red-200">
+                        <h3>Processing Error</h3>
+                        <pre class="text-red-700">${escapeHtml(data.error_message)}</pre>
+                    </div>`;
+                finalResponseContainerEl.innerHTML = errorCard;
+            }
+
+
+            // Display Pipeline Stages
+            if (data.pipeline_stages && data.pipeline_stages.length > 0) {
+                let stagesHtml = '';
+                data.pipeline_stages.forEach(stage => {
+                    stagesHtml += `
+                        <div class="pipeline-stage">
+                            <h3>${escapeHtml(stage.agent)}</h3>
+                            <pre>${escapeHtml(JSON.stringify(stage.output || stage.error || stage, null, 2))}</pre>
+                        </div>
+                    `;
+                });
+                pipelineStagesContainerEl.innerHTML = stagesHtml;
+            }
+        }
+
+        function escapeHtml(unsafe) {
+            if (unsafe === null || typeof unsafe === 'undefined') return '';
+            if (typeof unsafe !== 'string') {
+                try {
+                    unsafe = JSON.stringify(unsafe, null, 2); // Pretty print if object/array
+                } catch (e) {
+                    unsafe = String(unsafe);
+                }
+            }
+            return unsafe
+                 .replace(/&/g, "&amp;")
+                 .replace(/</g, "&lt;")
+                 .replace(/>/g, "&gt;")
+                 .replace(/"/g, "&quot;")
+                 .replace(/'/g, "&#039;");
+        }
+    </script>
+</body>
+</html>

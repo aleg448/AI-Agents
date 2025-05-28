@@ -126,7 +126,7 @@ class CodeGeneratorAgent:
         self.prompt = ChatPromptTemplate.from_messages([
             SystemMessagePromptTemplate.from_template(
                 "You are {name}, an AI assistant that generates simple code snippets (Python, Java, Javascript) "
-                "for cybersecurity training purposes. The code should ideally contain a potential, common security flaw "
+                "for cybersecurity training purposes. The code should randomly contain a potential, common security flaw "
                 "or represent a pattern worth analyzing (e.g., related to input handling, database interaction, file access)."
             ),
             HumanMessagePromptTemplate.from_template(
